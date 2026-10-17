@@ -216,3 +216,33 @@ async fn cart_shows_current_prices_and_flags_lines_that_cannot_be_bought() {
     assert_eq!(view["items"][0]["stock_available"], 1);
     assert_eq!(view["items"][0]["purchasable"], false);
 }
+
+#[tokio::test]
+async fn admin_stock_adjustments_are_bounded_and_never_go_negative() {
+    let app = spawn_app().await;
+    let p = app.create_product("Bulb", 500, 5).await;
+    let path = format!("/admin/products/{p}");
+
+    let huge = app.patch(&path, json!({ "stock_delta": i32::MAX })).await;
+    assert_eq!(
+        (huge.status.as_u16(), huge.code()),
+        (422, "VALIDATION_FAILED")
+    );
+    let negative = app.patch(&path, json!({ "stock_delta": -6 })).await;
+    assert_eq!(
+        (negative.status.as_u16(), negative.code()),
+        (409, "INSUFFICIENT_INVENTORY")
+    );
+    let empty = app.patch(&path, json!({})).await;
+    assert_eq!(
+        (empty.status.as_u16(), empty.code()),
+        (422, "VALIDATION_FAILED")
+    );
+    assert_eq!(app.stock(p).await, 5);
+
+    let restock = app.patch(&path, json!({ "stock_delta": 10 })).await;
+    assert_eq!(
+        (restock.status.as_u16(), restock.body["stock"].as_i64()),
+        (200, Some(15))
+    );
+}

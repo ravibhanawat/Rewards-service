@@ -10,6 +10,7 @@ use crate::{
 /// ₹1,000,000,000.00 — far above any real price, low enough that a full cart
 /// cannot overflow i64 paise.
 pub const MAX_UNIT_PRICE_PAISE: i64 = 100_000_000_000;
+pub const MAX_STOCK_DELTA: i32 = 1_000_000;
 
 pub async fn list(pool: &PgPool) -> AppResult<Vec<Product>> {
     Ok(sqlx::query_as("SELECT * FROM products ORDER BY name, id")
@@ -67,6 +68,14 @@ pub async fn update(pool: &PgPool, id: Uuid, update: ProductUpdate) -> AppResult
         });
     }
     let delta = update.stock_delta.unwrap_or(0);
+    if delta.unsigned_abs() > MAX_STOCK_DELTA.unsigned_abs() {
+        return Err(AppError::Validation {
+            field: "stock_delta",
+            message: format!(
+                "stock_delta must be between -{MAX_STOCK_DELTA} and {MAX_STOCK_DELTA}"
+            ),
+        });
+    }
 
     // Row lock via UPDATE: waits for any checkout currently holding this
     // product, then applies the delta to the committed stock.
@@ -74,16 +83,16 @@ pub async fn update(pool: &PgPool, id: Uuid, update: ProductUpdate) -> AppResult
         "UPDATE products SET
              name = COALESCE($2, name),
              price_paise = COALESCE($3, price_paise),
-             stock = stock + $4,
+             stock = (stock::bigint + $4)::int,
              active = COALESCE($5, active),
              updated_at = now()
-         WHERE id = $1 AND stock + $4 >= 0
+         WHERE id = $1 AND stock::bigint + $4 BETWEEN 0 AND 2147483647
          RETURNING *",
     )
     .bind(id)
     .bind(update.name.as_deref().map(str::trim))
     .bind(update.price_paise)
-    .bind(delta)
+    .bind(i64::from(delta))
     .bind(update.active)
     .fetch_optional(pool)
     .await?;
@@ -96,6 +105,10 @@ pub async fn update(pool: &PgPool, id: Uuid, update: ProductUpdate) -> AppResult
         .await?;
     match stock {
         None => Err(AppError::ProductNotFound(id)),
+        Some(available) if delta > 0 => Err(AppError::Validation {
+            field: "stock_delta",
+            message: format!("stock {available} + {delta} exceeds the maximum stock"),
+        }),
         Some(available) => Err(AppError::InsufficientInventory(vec![Shortfall {
             product_id: id,
             requested: delta.saturating_neg(),

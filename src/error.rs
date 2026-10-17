@@ -188,9 +188,13 @@ impl From<sqlx::Error> for AppError {
         }
         if let sqlx::Error::Database(db) = &err {
             // 40001 serialization_failure, 40P01 deadlock_detected,
-            // 55P03 lock_not_available (lock_timeout). None of these leave
-            // partial effects: the transaction is rolled back.
-            if matches!(db.code().as_deref(), Some("40001" | "40P01" | "55P03")) {
+            // 55P03 lock_not_available (lock_timeout), 57014 query_canceled
+            // (statement_timeout, in practice a long queue of lock waits).
+            // None of these leave partial effects: the transaction is rolled back.
+            if matches!(
+                db.code().as_deref(),
+                Some("40001" | "40P01" | "55P03" | "57014")
+            ) {
                 return AppError::Contention;
             }
         }
