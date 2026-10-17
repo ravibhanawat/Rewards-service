@@ -13,7 +13,9 @@ use crate::{
 /// checkouts commit concurrently. READ ONLY guarantees no mutation.
 pub async fn summary(pool: &PgPool) -> AppResult<SummaryReport> {
     let mut tx = pool.begin().await?;
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY").execute(&mut *tx).await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *tx)
+        .await?;
 
     let (successful_orders, gross, discounts, net): (i64, i64, i64, i64) = sqlx::query_as(
         "SELECT count(*),

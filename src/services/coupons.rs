@@ -33,7 +33,9 @@ pub async fn generate(pool: &PgPool, policy: RewardPolicy) -> AppResult<Generate
 
     // Orders are append-only and only exist once committed, so this count is
     // exactly "successfully placed orders" and can only grow.
-    let successful_orders: i64 = sqlx::query_scalar("SELECT count(*) FROM orders").fetch_one(&mut *tx).await?;
+    let successful_orders: i64 = sqlx::query_scalar("SELECT count(*) FROM orders")
+        .fetch_one(&mut *tx)
+        .await?;
     let n = policy.every_n_orders;
     let unrewarded: Vec<i64> = sqlx::query_scalar(
         "SELECT m FROM generate_series($1::bigint, $2::bigint, $1::bigint) AS m
@@ -69,15 +71,26 @@ pub async fn generate(pool: &PgPool, policy: RewardPolicy) -> AppResult<Generate
     let coupon = load(&mut tx, id).await?;
     tx.commit().await?;
 
-    Ok(GeneratedCoupon { coupon, successful_orders, remaining_eligible_milestones: unrewarded.len() as i64 - 1 })
+    Ok(GeneratedCoupon {
+        coupon,
+        successful_orders,
+        remaining_eligible_milestones: unrewarded.len() as i64 - 1,
+    })
 }
 
 pub async fn list(pool: &PgPool) -> AppResult<Vec<CouponView>> {
-    Ok(sqlx::query_as(&format!("{COUPON_SELECT} ORDER BY c.milestone_order_count")).fetch_all(pool).await?)
+    Ok(
+        sqlx::query_as(&format!("{COUPON_SELECT} ORDER BY c.milestone_order_count"))
+            .fetch_all(pool)
+            .await?,
+    )
 }
 
 async fn load(conn: &mut PgConnection, id: Uuid) -> AppResult<CouponView> {
-    Ok(sqlx::query_as(&format!("{COUPON_SELECT} WHERE c.id = $1")).bind(id).fetch_one(&mut *conn).await?)
+    Ok(sqlx::query_as(&format!("{COUPON_SELECT} WHERE c.id = $1"))
+        .bind(id)
+        .fetch_one(&mut *conn)
+        .await?)
 }
 
 /// Codes are bearer tokens (anyone holding one can redeem it), so they are

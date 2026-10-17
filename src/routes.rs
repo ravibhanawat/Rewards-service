@@ -38,7 +38,10 @@ pub fn router(state: AppState) -> Router {
         .route("/carts", post(create_cart))
         .route("/carts/{cart_id}", get(get_cart))
         .route("/carts/{cart_id}/items", post(add_item))
-        .route("/carts/{cart_id}/items/{product_id}", patch(update_item).delete(remove_item))
+        .route(
+            "/carts/{cart_id}/items/{product_id}",
+            patch(update_item).delete(remove_item),
+        )
         .route("/carts/{cart_id}/checkout", post(checkout))
         .route("/orders/{order_id}", get(get_order))
         .route("/admin/products/{product_id}", patch(update_product))
@@ -55,16 +58,26 @@ async fn list_products(State(state): State<AppState>) -> AppResult<Json<Vec<Prod
     Ok(Json(products::list(&state.pool).await?))
 }
 
-async fn get_product(State(state): State<AppState>, Path(id): Path<Uuid>) -> AppResult<Json<Product>> {
+async fn get_product(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> AppResult<Json<Product>> {
     Ok(Json(products::get(&state.pool, id).await?))
 }
 
 async fn create_cart(State(state): State<AppState>) -> AppResult<impl IntoResponse> {
     let cart = carts::create(&state.pool).await?;
-    Ok((StatusCode::CREATED, [(LOCATION, format!("/carts/{}", cart.id))], Json(cart)))
+    Ok((
+        StatusCode::CREATED,
+        [(LOCATION, format!("/carts/{}", cart.id))],
+        Json(cart),
+    ))
 }
 
-async fn get_cart(State(state): State<AppState>, Path(cart_id): Path<Uuid>) -> AppResult<Json<CartView>> {
+async fn get_cart(
+    State(state): State<AppState>,
+    Path(cart_id): Path<Uuid>,
+) -> AppResult<Json<CartView>> {
     Ok(Json(carts::get(&state.pool, cart_id).await?))
 }
 
@@ -97,14 +110,18 @@ async fn update_item(
     Path((cart_id, product_id)): Path<(Uuid, Uuid)>,
     Json(body): Json<UpdateItem>,
 ) -> AppResult<Json<CartView>> {
-    Ok(Json(carts::update_item(&state.pool, cart_id, product_id, body.quantity).await?))
+    Ok(Json(
+        carts::update_item(&state.pool, cart_id, product_id, body.quantity).await?,
+    ))
 }
 
 async fn remove_item(
     State(state): State<AppState>,
     Path((cart_id, product_id)): Path<(Uuid, Uuid)>,
 ) -> AppResult<Json<CartView>> {
-    Ok(Json(carts::remove_item(&state.pool, cart_id, product_id).await?))
+    Ok(Json(
+        carts::remove_item(&state.pool, cart_id, product_id).await?,
+    ))
 }
 
 /// 201 + Location for a new order; 200 + `Idempotent-Replayed: true` when the
@@ -121,28 +138,44 @@ async fn checkout(
     let request: CheckoutRequest = if body.iter().all(u8::is_ascii_whitespace) {
         CheckoutRequest::default()
     } else {
-        serde_json::from_slice(&body).map_err(|e| AppError::InvalidRequest(format!("invalid checkout body: {e}")))?
+        serde_json::from_slice(&body)
+            .map_err(|e| AppError::InvalidRequest(format!("invalid checkout body: {e}")))?
     };
-    Ok(match checkout::checkout(&state.pool, cart_id, key, request).await? {
-        CheckoutOutcome::Created(order) => {
-            (StatusCode::CREATED, [(LOCATION, format!("/orders/{}", order.id))], Json(order)).into_response()
-        }
-        CheckoutOutcome::Replayed(order) => {
-            (StatusCode::OK, [("idempotent-replayed", "true")], Json(order)).into_response()
-        }
-    })
+    Ok(
+        match checkout::checkout(&state.pool, cart_id, key, request).await? {
+            CheckoutOutcome::Created(order) => (
+                StatusCode::CREATED,
+                [(LOCATION, format!("/orders/{}", order.id))],
+                Json(order),
+            )
+                .into_response(),
+            CheckoutOutcome::Replayed(order) => (
+                StatusCode::OK,
+                [("idempotent-replayed", "true")],
+                Json(order),
+            )
+                .into_response(),
+        },
+    )
 }
 
 fn idempotency_key(headers: &HeaderMap) -> AppResult<&str> {
-    let value = headers.get("idempotency-key").ok_or(AppError::MissingIdempotencyKey)?;
-    let key = value.to_str().map_err(|_| AppError::InvalidIdempotencyKey)?;
+    let value = headers
+        .get("idempotency-key")
+        .ok_or(AppError::MissingIdempotencyKey)?;
+    let key = value
+        .to_str()
+        .map_err(|_| AppError::InvalidIdempotencyKey)?;
     if key.is_empty() || key.len() > MAX_IDEMPOTENCY_KEY_LEN {
         return Err(AppError::InvalidIdempotencyKey);
     }
     Ok(key)
 }
 
-async fn get_order(State(state): State<AppState>, Path(order_id): Path<Uuid>) -> AppResult<Json<OrderView>> {
+async fn get_order(
+    State(state): State<AppState>,
+    Path(order_id): Path<Uuid>,
+) -> AppResult<Json<OrderView>> {
     Ok(Json(orders::get(&state.pool, order_id).await?))
 }
 
@@ -162,8 +195,13 @@ async fn list_coupons(State(state): State<AppState>) -> AppResult<Json<Vec<Coupo
     Ok(Json(coupons::list(&state.pool).await?))
 }
 
-async fn generate_coupon(State(state): State<AppState>) -> AppResult<(StatusCode, Json<GeneratedCoupon>)> {
-    Ok((StatusCode::CREATED, Json(coupons::generate(&state.pool, state.rewards).await?)))
+async fn generate_coupon(
+    State(state): State<AppState>,
+) -> AppResult<(StatusCode, Json<GeneratedCoupon>)> {
+    Ok((
+        StatusCode::CREATED,
+        Json(coupons::generate(&state.pool, state.rewards).await?),
+    ))
 }
 
 async fn summary_report(State(state): State<AppState>) -> AppResult<Json<SummaryReport>> {

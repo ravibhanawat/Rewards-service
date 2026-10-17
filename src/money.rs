@@ -32,13 +32,22 @@ pub fn percentage_discount(subtotal: Paise, percent: i32) -> Paise {
 }
 
 /// Price an order from `(unit_price, quantity)` lines and an optional coupon.
-pub fn price_order(lines: &[(Paise, i32)], discount_percent: Option<i32>) -> Result<PriceBreakdown, Overflow> {
+pub fn price_order(
+    lines: &[(Paise, i32)],
+    discount_percent: Option<i32>,
+) -> Result<PriceBreakdown, Overflow> {
     let mut subtotal: Paise = 0;
     for &(unit_price, quantity) in lines {
-        subtotal = subtotal.checked_add(line_total(unit_price, quantity)?).ok_or(Overflow)?;
+        subtotal = subtotal
+            .checked_add(line_total(unit_price, quantity)?)
+            .ok_or(Overflow)?;
     }
     let discount = discount_percent.map_or(0, |pct| percentage_discount(subtotal, pct));
-    Ok(PriceBreakdown { subtotal, discount, total: subtotal - discount })
+    Ok(PriceBreakdown {
+        subtotal,
+        discount,
+        total: subtotal - discount,
+    })
 }
 
 #[cfg(test)]
@@ -74,7 +83,14 @@ mod tests {
 
         let none = price_order(&[(4_999, 3)], None).unwrap();
         assert_eq!((none.discount, none.total), (0, 14_997));
-        assert_eq!(price_order(&[], Some(10)).unwrap(), PriceBreakdown { subtotal: 0, discount: 0, total: 0 });
+        assert_eq!(
+            price_order(&[], Some(10)).unwrap(),
+            PriceBreakdown {
+                subtotal: 0,
+                discount: 0,
+                total: 0
+            }
+        );
     }
 
     #[test]

@@ -73,8 +73,16 @@ pub async fn checkout(
     idempotency_key: &str,
     request: CheckoutRequest,
 ) -> AppResult<CheckoutOutcome> {
-    let coupon_code = request.coupon_code.as_deref().map(normalize_coupon_code).transpose()?;
-    let fingerprint = fingerprint(cart_id, coupon_code.as_deref(), request.expected_subtotal_paise);
+    let coupon_code = request
+        .coupon_code
+        .as_deref()
+        .map(normalize_coupon_code)
+        .transpose()?;
+    let fingerprint = fingerprint(
+        cart_id,
+        coupon_code.as_deref(),
+        request.expected_subtotal_paise,
+    );
 
     let mut tx = pool.begin().await?;
 
@@ -85,19 +93,20 @@ pub async fn checkout(
 
     // 1. Cart lock. A concurrent checkout of the same cart (retry or not)
     //    waits here, then sees the committed outcome of the first one.
-    let status: Option<String> = sqlx::query_scalar("SELECT status FROM carts WHERE id = $1 FOR UPDATE")
-        .bind(cart_id)
-        .fetch_optional(&mut *tx)
-        .await?;
+    let status: Option<String> =
+        sqlx::query_scalar("SELECT status FROM carts WHERE id = $1 FOR UPDATE")
+            .bind(cart_id)
+            .fetch_optional(&mut *tx)
+            .await?;
     match status.as_deref() {
         None => return Err(AppError::CartNotFound(cart_id)),
         Some("open") => {}
         Some(_) => {
             // A duplicate that lost the lock race to the request carrying the
             // same key: answer with the order that request created.
-            let existing = order_for_cart(&mut tx, cart_id)
-                .await?
-                .ok_or_else(|| AppError::Internal(format!("checked-out cart {cart_id} has no order")))?;
+            let existing = order_for_cart(&mut tx, cart_id).await?.ok_or_else(|| {
+                AppError::Internal(format!("checked-out cart {cart_id} has no order"))
+            })?;
             if existing.idempotency_key == idempotency_key {
                 return replay(&mut tx, existing, &fingerprint).await;
             }
@@ -126,14 +135,22 @@ pub async fn checkout(
     if lines.is_empty() {
         return Err(AppError::EmptyCart);
     }
-    let unavailable: Vec<Uuid> = lines.iter().filter(|l| !l.active).map(|l| l.product_id).collect();
+    let unavailable: Vec<Uuid> = lines
+        .iter()
+        .filter(|l| !l.active)
+        .map(|l| l.product_id)
+        .collect();
     if !unavailable.is_empty() {
         return Err(AppError::ProductUnavailable(unavailable));
     }
     let shortfalls: Vec<Shortfall> = lines
         .iter()
         .filter(|l| l.quantity > l.stock)
-        .map(|l| Shortfall { product_id: l.product_id, requested: l.quantity, available: l.stock })
+        .map(|l| Shortfall {
+            product_id: l.product_id,
+            requested: l.quantity,
+            available: l.stock,
+        })
         .collect();
     if !shortfalls.is_empty() {
         return Err(AppError::InsufficientInventory(shortfalls));
@@ -144,7 +161,10 @@ pub async fn checkout(
     if let Some(expected) = request.expected_subtotal_paise
         && expected != price.subtotal
     {
-        return Err(AppError::PriceChanged { expected_subtotal_paise: expected, actual_subtotal_paise: price.subtotal });
+        return Err(AppError::PriceChanged {
+            expected_subtotal_paise: expected,
+            actual_subtotal_paise: price.subtotal,
+        });
     }
 
     // 4. Effects. Rows are locked, so the stock guard cannot fail here; it
@@ -162,7 +182,9 @@ pub async fn checkout(
     .await?
     .rows_affected();
     if decremented != lines.len() as u64 {
-        return Err(AppError::Internal(format!("stock changed under lock for cart {cart_id}")));
+        return Err(AppError::Internal(format!(
+            "stock changed under lock for cart {cart_id}"
+        )));
     }
 
     let order_id = Uuid::new_v4();
@@ -188,7 +210,9 @@ pub async fn checkout(
         // Same key used concurrently for a *different* cart (same-cart
         // duplicates were already serialized by the cart lock).
         Some("orders_idempotency_key_unique") => AppError::IdempotencyKeyReused,
-        Some("orders_coupon_unique") => AppError::CouponAlreadyRedeemed(coupon_code.clone().unwrap_or_default()),
+        Some("orders_coupon_unique") => {
+            AppError::CouponAlreadyRedeemed(coupon_code.clone().unwrap_or_default())
+        }
         Some("orders_cart_unique") => AppError::CartAlreadyCheckedOut(cart_id),
         _ => err.into(),
     })?;
@@ -233,10 +257,11 @@ async fn lock_unredeemed_coupon(conn: &mut PgConnection, code: &str) -> AppResul
             .ok_or_else(|| AppError::UnknownCoupon(code.to_string()))?;
     // New statement => new READ COMMITTED snapshot taken after the lock was
     // granted, so it sees an order committed by the previous lock holder.
-    let redeemed: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM orders WHERE coupon_id = $1)")
-        .bind(coupon.id)
-        .fetch_one(&mut *conn)
-        .await?;
+    let redeemed: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM orders WHERE coupon_id = $1)")
+            .bind(coupon.id)
+            .fetch_one(&mut *conn)
+            .await?;
     if redeemed {
         return Err(AppError::CouponAlreadyRedeemed(coupon.code));
     }
@@ -244,24 +269,37 @@ async fn lock_unredeemed_coupon(conn: &mut PgConnection, code: &str) -> AppResul
 }
 
 async fn order_for_key(conn: &mut PgConnection, key: &str) -> AppResult<Option<OrderIdentity>> {
-    Ok(sqlx::query_as("SELECT id, idempotency_key, request_fingerprint FROM orders WHERE idempotency_key = $1")
-        .bind(key)
-        .fetch_optional(&mut *conn)
-        .await?)
+    Ok(sqlx::query_as(
+        "SELECT id, idempotency_key, request_fingerprint FROM orders WHERE idempotency_key = $1",
+    )
+    .bind(key)
+    .fetch_optional(&mut *conn)
+    .await?)
 }
 
-async fn order_for_cart(conn: &mut PgConnection, cart_id: Uuid) -> AppResult<Option<OrderIdentity>> {
-    Ok(sqlx::query_as("SELECT id, idempotency_key, request_fingerprint FROM orders WHERE cart_id = $1")
-        .bind(cart_id)
-        .fetch_optional(&mut *conn)
-        .await?)
+async fn order_for_cart(
+    conn: &mut PgConnection,
+    cart_id: Uuid,
+) -> AppResult<Option<OrderIdentity>> {
+    Ok(sqlx::query_as(
+        "SELECT id, idempotency_key, request_fingerprint FROM orders WHERE cart_id = $1",
+    )
+    .bind(cart_id)
+    .fetch_optional(&mut *conn)
+    .await?)
 }
 
-async fn replay(conn: &mut PgConnection, existing: OrderIdentity, fingerprint: &str) -> AppResult<CheckoutOutcome> {
+async fn replay(
+    conn: &mut PgConnection,
+    existing: OrderIdentity,
+    fingerprint: &str,
+) -> AppResult<CheckoutOutcome> {
     if existing.request_fingerprint != fingerprint {
         return Err(AppError::IdempotencyKeyReused);
     }
-    Ok(CheckoutOutcome::Replayed(orders::load(conn, existing.id).await?))
+    Ok(CheckoutOutcome::Replayed(
+        orders::load(conn, existing.id).await?,
+    ))
 }
 
 fn normalize_coupon_code(raw: &str) -> AppResult<String> {
@@ -277,7 +315,11 @@ fn normalize_coupon_code(raw: &str) -> AppResult<String> {
 
 /// Identifies "the same checkout request" for idempotency purposes. Uses the
 /// normalized coupon code so `save10` and ` SAVE10 ` are the same request.
-fn fingerprint(cart_id: Uuid, coupon_code: Option<&str>, expected_subtotal: Option<Paise>) -> String {
+fn fingerprint(
+    cart_id: Uuid,
+    coupon_code: Option<&str>,
+    expected_subtotal: Option<Paise>,
+) -> String {
     let canonical = format!(
         "checkout/v1|cart={cart_id}|coupon={}|expected_subtotal={}",
         coupon_code.unwrap_or(""),

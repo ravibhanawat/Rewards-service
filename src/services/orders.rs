@@ -9,8 +9,7 @@ use crate::{
     models::{AppliedCoupon, CURRENCY, OrderItem, OrderView},
 };
 
-const ORDER_COLUMNS: &str =
-    "id, cart_id, subtotal_paise, discount_paise, total_paise, coupon_code, discount_percent, created_at";
+const ORDER_COLUMNS: &str = "id, cart_id, subtotal_paise, discount_paise, total_paise, coupon_code, discount_percent, created_at";
 
 #[derive(FromRow)]
 struct OrderRow {
@@ -34,7 +33,10 @@ struct ItemRow {
 impl OrderRow {
     fn into_view(self, items: Vec<OrderItem>) -> OrderView {
         let coupon = match (self.coupon_code, self.discount_percent) {
-            (Some(code), Some(discount_percent)) => Some(AppliedCoupon { code, discount_percent }),
+            (Some(code), Some(discount_percent)) => Some(AppliedCoupon {
+                code,
+                discount_percent,
+            }),
             _ => None,
         };
         OrderView {
@@ -57,11 +59,12 @@ pub async fn get(pool: &PgPool, id: Uuid) -> AppResult<OrderView> {
 }
 
 pub async fn load(conn: &mut PgConnection, id: Uuid) -> AppResult<OrderView> {
-    let order: OrderRow = sqlx::query_as(&format!("SELECT {ORDER_COLUMNS} FROM orders WHERE id = $1"))
-        .bind(id)
-        .fetch_optional(&mut *conn)
-        .await?
-        .ok_or(AppError::OrderNotFound(id))?;
+    let order: OrderRow =
+        sqlx::query_as(&format!("SELECT {ORDER_COLUMNS} FROM orders WHERE id = $1"))
+            .bind(id)
+            .fetch_optional(&mut *conn)
+            .await?
+            .ok_or(AppError::OrderNotFound(id))?;
     let items: Vec<OrderItem> = sqlx::query_as(
         "SELECT product_id, product_name, unit_price_paise, quantity, line_total_paise
          FROM order_items WHERE order_id = $1 ORDER BY product_id",
@@ -76,10 +79,14 @@ pub async fn load(conn: &mut PgConnection, id: Uuid) -> AppResult<OrderView> {
 pub async fn list(pool: &PgPool) -> AppResult<Vec<OrderView>> {
     // One snapshot for both queries so every listed order has all its items.
     let mut tx = pool.begin().await?;
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY").execute(&mut *tx).await?;
-    let orders: Vec<OrderRow> = sqlx::query_as(&format!("SELECT {ORDER_COLUMNS} FROM orders ORDER BY created_at, id"))
-        .fetch_all(&mut *tx)
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *tx)
         .await?;
+    let orders: Vec<OrderRow> = sqlx::query_as(&format!(
+        "SELECT {ORDER_COLUMNS} FROM orders ORDER BY created_at, id"
+    ))
+    .fetch_all(&mut *tx)
+    .await?;
     let items: Vec<ItemRow> = sqlx::query_as(
         "SELECT order_id, product_id, product_name, unit_price_paise, quantity, line_total_paise
          FROM order_items ORDER BY order_id, product_id",

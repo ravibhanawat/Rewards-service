@@ -12,7 +12,9 @@ use crate::{
 pub const MAX_UNIT_PRICE_PAISE: i64 = 100_000_000_000;
 
 pub async fn list(pool: &PgPool) -> AppResult<Vec<Product>> {
-    Ok(sqlx::query_as("SELECT * FROM products ORDER BY name, id").fetch_all(pool).await?)
+    Ok(sqlx::query_as("SELECT * FROM products ORDER BY name, id")
+        .fetch_all(pool)
+        .await?)
 }
 
 pub async fn get(pool: &PgPool, id: Uuid) -> AppResult<Product> {
@@ -38,13 +40,23 @@ pub struct ProductUpdate {
 /// Administrative product edit, used to exercise price and availability
 /// changes between "add to cart" and checkout.
 pub async fn update(pool: &PgPool, id: Uuid, update: ProductUpdate) -> AppResult<Product> {
-    if update.name.is_none() && update.price_paise.is_none() && update.stock_delta.is_none() && update.active.is_none() {
-        return Err(AppError::Validation { field: "body", message: "provide at least one field to update".into() });
+    if update.name.is_none()
+        && update.price_paise.is_none()
+        && update.stock_delta.is_none()
+        && update.active.is_none()
+    {
+        return Err(AppError::Validation {
+            field: "body",
+            message: "provide at least one field to update".into(),
+        });
     }
     if let Some(name) = &update.name
         && !(1..=200).contains(&name.trim().chars().count())
     {
-        return Err(AppError::Validation { field: "name", message: "name must be 1-200 characters".into() });
+        return Err(AppError::Validation {
+            field: "name",
+            message: "name must be 1-200 characters".into(),
+        });
     }
     if let Some(price) = update.price_paise
         && !(0..=MAX_UNIT_PRICE_PAISE).contains(&price)

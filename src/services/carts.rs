@@ -12,7 +12,10 @@ pub const MAX_LINE_QUANTITY: i64 = 1000;
 pub async fn create(pool: &PgPool) -> AppResult<CartView> {
     let mut conn = pool.acquire().await?;
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO carts (id) VALUES ($1)").bind(id).execute(&mut *conn).await?;
+    sqlx::query("INSERT INTO carts (id) VALUES ($1)")
+        .bind(id)
+        .execute(&mut *conn)
+        .await?;
     load(&mut conn, id).await
 }
 
@@ -22,7 +25,12 @@ pub async fn get(pool: &PgPool, cart_id: Uuid) -> AppResult<CartView> {
 
 /// Adds a new line. Adding a product that is already in the cart is a 409
 /// rather than an increment, so a retried request cannot double the quantity.
-pub async fn add_item(pool: &PgPool, cart_id: Uuid, product_id: Uuid, quantity: i64) -> AppResult<CartView> {
+pub async fn add_item(
+    pool: &PgPool,
+    cart_id: Uuid,
+    product_id: Uuid,
+    quantity: i64,
+) -> AppResult<CartView> {
     let quantity = validate_quantity(quantity)?;
     let mut tx = pool.begin().await?;
     lock_open_cart(&mut tx, cart_id).await?;
@@ -46,7 +54,12 @@ pub async fn add_item(pool: &PgPool, cart_id: Uuid, product_id: Uuid, quantity: 
 }
 
 /// Sets the absolute quantity of an existing line (idempotent).
-pub async fn update_item(pool: &PgPool, cart_id: Uuid, product_id: Uuid, quantity: i64) -> AppResult<CartView> {
+pub async fn update_item(
+    pool: &PgPool,
+    cart_id: Uuid,
+    product_id: Uuid,
+    quantity: i64,
+) -> AppResult<CartView> {
     let quantity = validate_quantity(quantity)?;
     let mut tx = pool.begin().await?;
     lock_open_cart(&mut tx, cart_id).await?;
@@ -60,7 +73,10 @@ pub async fn update_item(pool: &PgPool, cart_id: Uuid, product_id: Uuid, quantit
     .await?
     .rows_affected();
     if updated == 0 {
-        return Err(AppError::ItemNotInCart { cart_id, product_id });
+        return Err(AppError::ItemNotInCart {
+            cart_id,
+            product_id,
+        });
     }
     check_purchasable(&mut tx, product_id, quantity).await?;
     let cart = load(&mut tx, cart_id).await?;
@@ -78,7 +94,10 @@ pub async fn remove_item(pool: &PgPool, cart_id: Uuid, product_id: Uuid) -> AppR
         .await?
         .rows_affected();
     if deleted == 0 {
-        return Err(AppError::ItemNotInCart { cart_id, product_id });
+        return Err(AppError::ItemNotInCart {
+            cart_id,
+            product_id,
+        });
     }
     let cart = load(&mut tx, cart_id).await?;
     tx.commit().await?;
@@ -100,11 +119,12 @@ fn validate_quantity(quantity: i64) -> AppResult<i32> {
 /// open. Checkout takes the same row lock, so cart contents cannot change
 /// while a checkout is reading them, and nothing can be added afterwards.
 async fn lock_open_cart(conn: &mut PgConnection, cart_id: Uuid) -> AppResult<()> {
-    let locked = sqlx::query("UPDATE carts SET updated_at = now() WHERE id = $1 AND status = 'open'")
-        .bind(cart_id)
-        .execute(&mut *conn)
-        .await?
-        .rows_affected();
+    let locked =
+        sqlx::query("UPDATE carts SET updated_at = now() WHERE id = $1 AND status = 'open'")
+            .bind(cart_id)
+            .execute(&mut *conn)
+            .await?
+            .rows_affected();
     if locked == 1 {
         return Ok(());
     }
@@ -112,24 +132,35 @@ async fn lock_open_cart(conn: &mut PgConnection, cart_id: Uuid) -> AppResult<()>
         .bind(cart_id)
         .fetch_one(&mut *conn)
         .await?;
-    Err(if exists { AppError::CartAlreadyCheckedOut(cart_id) } else { AppError::CartNotFound(cart_id) })
+    Err(if exists {
+        AppError::CartAlreadyCheckedOut(cart_id)
+    } else {
+        AppError::CartNotFound(cart_id)
+    })
 }
 
 /// Advisory check at add/update time so obviously invalid lines never enter a
 /// cart. It does not reserve stock: checkout re-validates under row locks.
-async fn check_purchasable(conn: &mut PgConnection, product_id: Uuid, quantity: i32) -> AppResult<()> {
-    let product: Option<(i32, bool)> = sqlx::query_as("SELECT stock, active FROM products WHERE id = $1")
-        .bind(product_id)
-        .fetch_optional(&mut *conn)
-        .await?;
+async fn check_purchasable(
+    conn: &mut PgConnection,
+    product_id: Uuid,
+    quantity: i32,
+) -> AppResult<()> {
+    let product: Option<(i32, bool)> =
+        sqlx::query_as("SELECT stock, active FROM products WHERE id = $1")
+            .bind(product_id)
+            .fetch_optional(&mut *conn)
+            .await?;
     match product {
         None => Err(AppError::UnknownProduct(product_id)),
         Some((_, false)) => Err(AppError::ProductUnavailable(vec![product_id])),
-        Some((stock, true)) if quantity > stock => Err(AppError::InsufficientInventory(vec![Shortfall {
-            product_id,
-            requested: quantity,
-            available: stock,
-        }])),
+        Some((stock, true)) if quantity > stock => {
+            Err(AppError::InsufficientInventory(vec![Shortfall {
+                product_id,
+                requested: quantity,
+                available: stock,
+            }]))
+        }
         Some(_) => Ok(()),
     }
 }

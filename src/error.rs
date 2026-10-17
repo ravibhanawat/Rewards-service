@@ -41,7 +41,10 @@ pub enum AppError {
     InvalidIdempotencyKey,
 
     #[error("{message}")]
-    Validation { field: &'static str, message: String },
+    Validation {
+        field: &'static str,
+        message: String,
+    },
     #[error("product {0} does not exist")]
     UnknownProduct(Uuid),
     #[error("coupon {0:?} does not exist")]
@@ -73,9 +76,16 @@ pub enum AppError {
     #[error("coupon {0:?} has already been redeemed")]
     CouponAlreadyRedeemed(String),
     #[error("cart subtotal changed since it was last viewed")]
-    PriceChanged { expected_subtotal_paise: Paise, actual_subtotal_paise: Paise },
+    PriceChanged {
+        expected_subtotal_paise: Paise,
+        actual_subtotal_paise: Paise,
+    },
     #[error("no unrewarded order milestone is eligible for a coupon")]
-    NoEligibleMilestone { successful_orders: i64, every_n_orders: i64, next_milestone_order_count: i64 },
+    NoEligibleMilestone {
+        successful_orders: i64,
+        every_n_orders: i64,
+        next_milestone_order_count: i64,
+    },
     #[error("the request conflicted with a concurrent operation; it is safe to retry")]
     Contention,
     #[error("the service is temporarily overloaded; retry shortly")]
@@ -123,15 +133,25 @@ impl AppError {
             UnknownCoupon(code) | CouponAlreadyRedeemed(code) => json!({ "coupon_code": code }),
             CartNotFound(id) | CartAlreadyCheckedOut(id) => json!({ "cart_id": id }),
             OrderNotFound(id) => json!({ "order_id": id }),
-            ItemNotInCart { cart_id, product_id } => json!({ "cart_id": cart_id, "product_id": product_id }),
+            ItemNotInCart {
+                cart_id,
+                product_id,
+            } => json!({ "cart_id": cart_id, "product_id": product_id }),
             ItemAlreadyInCart { product_id } => json!({ "product_id": product_id }),
             InsufficientInventory(items) => json!({ "items": items }),
             ProductUnavailable(ids) => json!({ "product_ids": ids }),
-            PriceChanged { expected_subtotal_paise, actual_subtotal_paise } => json!({
+            PriceChanged {
+                expected_subtotal_paise,
+                actual_subtotal_paise,
+            } => json!({
                 "expected_subtotal_paise": expected_subtotal_paise,
                 "actual_subtotal_paise": actual_subtotal_paise,
             }),
-            NoEligibleMilestone { successful_orders, every_n_orders, next_milestone_order_count } => json!({
+            NoEligibleMilestone {
+                successful_orders,
+                every_n_orders,
+                next_milestone_order_count,
+            } => json!({
                 "successful_orders": successful_orders,
                 "every_n_orders": every_n_orders,
                 "next_milestone_order_count": next_milestone_order_count,
@@ -177,7 +197,10 @@ impl From<sqlx::Error> for AppError {
 
 impl From<Overflow> for AppError {
     fn from(_: Overflow) -> Self {
-        AppError::Validation { field: "cart", message: "cart total exceeds the supported amount".into() }
+        AppError::Validation {
+            field: "cart",
+            message: "cart total exceeds the supported amount".into(),
+        }
     }
 }
 
