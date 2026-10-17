@@ -61,7 +61,7 @@ Reset to a fresh database with `docker compose down -v && docker compose up -d -
 | `REWARD_DISCOUNT_PERCENT` | `10` | *x*: coupon discount in percent (1–100) |
 | `RUST_LOG` | `info,sqlx=warn` | Log filter (`tracing-subscriber` `EnvFilter` syntax) |
 
-Every pooled connection also sets `lock_timeout = 5s` and `statement_timeout = 15s` (see `src/db.rs`). Under heavy contention a request then fails with a retryable `409 CONCURRENT_UPDATE` instead of hanging.
+Every pooled connection also sets `lock_timeout = 5s` and `statement_timeout = 15s` (see `src/db.rs`). Under heavy contention a request then fails with a retryable `409 CONCURRENT_UPDATE` instead of hanging (lock timeout, statement timeout, deadlock and serialization failures all map to it).
 
 ## Running the tests
 
@@ -77,7 +77,7 @@ cargo test                      # unit + integration tests
 | File | Covers |
 |---|---|
 | `src/money.rs` (unit) | Half-up rounding, discount ≤ subtotal, zero totals, overflow is reported rather than wrapped |
-| `tests/it/carts.rs` | Empty cart; invalid products and quantities rejected without side effects; add/update/remove totals; current-price display |
+| `tests/it/carts.rs` | Empty cart; invalid products and quantities rejected without side effects; add/update/remove totals; current-price display; admin stock adjustments bounded and never negative |
 | `tests/it/checkout.rs` | Order snapshot survives product edits; DB rejects tampering; same-key replay; key reuse → 422; second key → 409; failed checkout leaves coupon, stock, and cart untouched; price guard; discontinued products |
 | `tests/it/coupons.rs` | Exact milestone boundary; failed checkouts don't count; delayed generation rewards each milestone once, in order; half-up discount; single use; 100 % coupon → total 0 |
 | `tests/it/concurrency.rs` | Competing requests released together through a barrier on a multi-threaded runtime (below) |
@@ -93,6 +93,8 @@ What the concurrency tests prove, each by asserting final database state:
 - **Nine checkouts that lock the coupon and then fail on stock, plus one valid checkout:** the valid one always gets the coupon.
 - **10 concurrent coupon generations with 2 eligible milestones:** exactly the coupons for milestones {2, 4}.
 - **"Add item" racing checkout:** the order always contains exactly what the cart contains.
+- **One `Idempotency-Key` sent for two different carts at the same instant (10 rounds):** exactly one order per round, the other request gets `422 IDEMPOTENCY_KEY_REUSED`, and its cart stays open.
+- **Reports read while 30 checkouts commit:** every report is internally consistent (per-product revenue equals order totals in the same response).
 
 ## Seed data
 
@@ -289,7 +291,7 @@ Sets the **absolute** quantity, so the request is idempotent.
 
 Returns `200` with the updated cart. Use DELETE to remove a line; `quantity: 0` is a `422`.
 
-Errors: as for POST, plus `404 ITEM_NOT_IN_CART`.
+Errors: `404 CART_NOT_FOUND`, `404 ITEM_NOT_IN_CART` (the product is not in this cart), `409 CART_ALREADY_CHECKED_OUT`, `422 VALIDATION_FAILED` (quantity outside 1–1000), `409 INSUFFICIENT_INVENTORY` / `409 PRODUCT_UNAVAILABLE` (the new quantity can't currently be bought), `400 INVALID_REQUEST`. To remove a line, use `DELETE`.
 
 ### `DELETE /carts/{cart_id}/items/{product_id}`
 
@@ -446,16 +448,16 @@ Edits a product, so you can exercise price and availability changes between "add
 { "name": "Desk Mat v2", "price_paise": 109900, "stock_delta": 5, "active": true }
 ```
 
-`stock_delta` is a **relative** adjustment (restock or write-off). An absolute "set stock to N" would silently overwrite decrements from checkouts that commit between reading and writing.
+`stock_delta` is a **relative** adjustment (restock or write-off), limited to ±1,000,000 per call. An absolute "set stock to N" would silently overwrite decrements from checkouts that commit between reading and writing.
 
 Returns `200` with the updated product.
 
 | Error | When |
 |---|---|
-| `422 VALIDATION_FAILED` | Empty body, name not 1–200 chars, or `price_paise` outside 0–100,000,000,000 |
+| `422 VALIDATION_FAILED` | `{}` (no fields), name not 1–200 chars, `price_paise` outside 0–100,000,000,000, or `stock_delta` outside ±1,000,000 |
 | `404 PRODUCT_NOT_FOUND` | Product id does not exist |
 | `409 INSUFFICIENT_INVENTORY` | The delta would make stock negative |
-| `400 INVALID_REQUEST` | Malformed body or unknown field |
+| `400 INVALID_REQUEST` | Missing or malformed JSON body, or unknown field |
 
 ## curl walkthrough
 

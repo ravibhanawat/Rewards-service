@@ -21,15 +21,15 @@ Each invariant lists where it is enforced in application code, the database back
 | I1 | **Inventory is never oversold and never negative.** | `checkout` in `src/services/checkout.rs` locks product rows (`FOR NO KEY UPDATE OF p`, ordered by id) and validates stock while holding the locks. The decrement is also guarded (`AND p.stock >= u.quantity`, and the affected-row count is checked). | `products_stock_non_negative CHECK (stock >= 0)` | `concurrency.rs::concurrent_checkouts_never_oversell_limited_stock`, `overlapping_carts_do_not_deadlock_or_oversell` |
 | I2 | **A cart produces at most one order.** | The cart row lock (`SELECT status … FOR UPDATE`) plus the `status = 'open'` check in `checkout`. | `orders_cart_unique UNIQUE (cart_id)`, mapped to `CART_ALREADY_CHECKED_OUT` | `checkout.rs::a_cart_is_checked_out_at_most_once_even_with_a_new_key`, `concurrency.rs::concurrent_checkouts_of_one_cart_with_different_keys_create_one_order` |
 | I3 | **A retried checkout never creates a second order or decrements stock twice.** | `order_for_key` and `replay` in `checkout.rs`, plus the replay path after the cart lock. | `orders_idempotency_key_unique` | `checkout.rs::retrying_with_the_same_key_replays_the_order_without_side_effects`, `concurrency.rs::concurrent_retries_of_one_checkout_create_exactly_one_order` |
-| I4 | **An idempotency key is bound to exactly one request.** | The request fingerprint is compared in `replay`. | `orders_idempotency_key_unique`, mapped to `IDEMPOTENCY_KEY_REUSED` | `checkout.rs::reusing_a_key_for_a_different_request_is_rejected` |
+| I4 | **An idempotency key is bound to exactly one request.** | The request fingerprint is compared in `replay`. | `orders_idempotency_key_unique`, mapped to `IDEMPOTENCY_KEY_REUSED` | `checkout.rs::reusing_a_key_for_a_different_request_is_rejected`, `concurrency.rs::one_key_racing_on_two_carts_creates_exactly_one_order` |
 | I5 | **A coupon is redeemed at most once.** | `lock_unredeemed_coupon` (`FOR UPDATE` on the coupon row, then an `EXISTS` check on orders). | `orders_coupon_unique UNIQUE (coupon_id)` | `concurrency.rs::a_coupon_is_redeemed_by_at_most_one_of_many_concurrent_checkouts`, `coupons.rs::discount_rounds_half_up_and_a_coupon_is_single_use` |
 | I6 | **A failed checkout consumes nothing: no coupon, no inventory, and the cart is not closed.** | Every effect lives in one transaction, and validation runs before any write. | Atomic commit/rollback. Coupon state is derived from orders, so there is nothing separate to "un-claim". | `checkout.rs::failed_checkout_leaves_coupon_inventory_and_cart_untouched`, `concurrency.rs::checkouts_that_fail_while_holding_the_coupon_do_not_consume_it`, `checkout.rs::invalid_checkout_requests_fail_without_side_effects` |
-| I7 | **An order explains its own total and never changes afterwards.** | `order_items` snapshots the name, unit price, quantity and line total. `orders` snapshots the coupon code and percent. | `order_items_line_total_reconciles`, `orders_total_reconciles`, `orders_discount_within_subtotal`, `orders_coupon_snapshot_complete`. Triggers `orders_immutable` and `order_items_immutable` reject UPDATE and DELETE. | `checkout.rs::checkout_creates_an_order_whose_snapshot_survives_product_changes` (it also tries to tamper through SQL and expects an error) |
+| I7 | **An order explains its own total and never changes afterwards.** | `order_items` snapshots the name, unit price, quantity and line total. `orders` snapshots the coupon code and percent. | `order_items_line_total_reconciles`, `orders_total_reconciles`, `orders_discount_within_subtotal`, `orders_coupon_snapshot_complete`. Triggers `orders_immutable`, `order_items_immutable` and `coupons_immutable` reject UPDATE and DELETE. | `checkout.rs::checkout_creates_an_order_whose_snapshot_survives_product_changes` and `coupons.rs::discount_rounds_half_up_and_a_coupon_is_single_use` tamper through raw SQL and assert the *trigger's* error message, so a CHECK or FK failure can't make them pass by accident |
 | I8 | **Money totals are exact and never negative.** | `src/money.rs`: integer paise, checked arithmetic, one rounding per order, and the discount is capped at the subtotal. | `CHECK`s on `subtotal_paise`, `discount_paise` and `total_paise >= 0`; `discount_paise <= subtotal_paise` | Unit tests in `src/money.rs`; `coupons.rs::a_full_discount_yields_a_zero_total_never_a_negative_one` |
 | I9 | **Each order milestone yields at most one coupon, and only once it has been reached.** | `coupons::generate` in `src/services/coupons.rs` holds a `pg_advisory_xact_lock` and counts committed orders. | `coupons_milestone_unique`; the `coupons_immutable` trigger | `coupons.rs::coupon_becomes_available_exactly_at_the_milestone`, `delayed_generation_rewards_each_missed_milestone_once_in_order`, `failed_checkouts_do_not_count_towards_milestones`, `concurrency.rs::concurrent_coupon_generation_never_duplicates_a_milestone` |
 | I10 | **A cart's contents cannot change during or after checkout.** | Cart mutations call `lock_open_cart` (`UPDATE carts … WHERE status = 'open'`), which conflicts with checkout's cart lock. | `carts.status CHECK` | `concurrency.rs::items_added_during_checkout_are_either_ordered_or_rejected` |
 | I11 | **Invalid lines never enter a cart.** | `validate_quantity` and `check_purchasable` in `src/services/carts.rs` | `cart_items` primary key `(cart_id, product_id)`, `CHECK (quantity BETWEEN 1 AND 1000)`, FK to `products` | `carts.rs::invalid_products_and_quantities_never_enter_the_cart` |
-| I12 | **Reports reconcile with the orders and coupons the API returns, and reading a report changes nothing.** | `reports::summary` reads one REPEATABLE READ, READ ONLY snapshot with three separate aggregates. | `READ ONLY` transaction | `reporting.rs::report_reconciles_with_orders_and_coupons_and_never_mutates_state` |
+| I12 | **Reports reconcile with the orders and coupons the API returns, and reading a report changes nothing.** | `reports::summary` reads one REPEATABLE READ, READ ONLY snapshot with three separate aggregates. | `READ ONLY` transaction | `reporting.rs::report_reconciles_with_orders_and_coupons_and_never_mutates_state`, `concurrency.rs::reports_taken_during_concurrent_checkouts_are_internally_consistent` |
 
 ---
 
@@ -268,6 +268,8 @@ The status rule I applied:
 
 **Context:** The suggested structure had models, handlers, services and repositories.
 
+**Options considered:** A repository layer (one module per table, services composing repository calls). An ORM or query builder. Services that own their SQL directly, with a thin HTTP layer above them.
+
 **Choice:**
 - `src/routes.rs`: HTTP mapping only.
 - `src/services/*.rs`: one module per area. Each public function owns its transaction boundary and contains its SQL.
@@ -341,7 +343,7 @@ Any error at any step returns early. Dropping the uncommitted sqlx transaction r
 - **Cart mutations** hold only their own cart's lock. Their product FK check takes `KEY SHARE`, which doesn't conflict with checkout's `NO KEY UPDATE`, so they never wait on a product.
 - **Admin product updates** hold one lock and wait for at most one.
 - **Coupon generation** takes no row locks on existing rows.
-- **Backstops.** If a future change breaks the ordering, Postgres detects the deadlock (`40P01`) and the transaction rolls back cleanly. `lock_timeout = 5s` and `statement_timeout = 15s` (set as connection startup options in `src/db.rs`) bound every wait. `40001`, `40P01` and `55P03` all map to `409 CONCURRENT_UPDATE` with `retryable: true`. Pool exhaustion (`PoolTimedOut`, after a 5 s acquire timeout) maps to `503`.
+- **Backstops.** If a future change breaks the ordering, Postgres detects the deadlock (`40P01`) and the transaction rolls back cleanly. `lock_timeout = 5s` and `statement_timeout = 15s` (set as connection startup options in `src/db.rs`) bound every wait. `40001`, `40P01`, `55P03` (lock timeout) and `57014` (statement timeout) all map to `409 CONCURRENT_UPDATE` with `retryable: true`. Pool exhaustion (`PoolTimedOut`, after a 5 s acquire timeout) maps to `503`.
 
 ### Behaviour for each scenario
 
@@ -365,7 +367,9 @@ Any error at any step returns early. Dropping the uncommitted sqlx transaction r
 
 ### Multiple instances
 
-Nothing in the design lives in process memory: no caches, counters or idempotency maps. All coordination is row locks, unique constraints and one database-scoped advisory lock, so running N instances against one Postgres keeps every guarantee above unchanged.
+Nothing in the design lives in process memory: no caches, counters or idempotency maps. All coordination is row locks, unique constraints and one database-scoped advisory lock, so running N instances against one Postgres keeps every data guarantee above unchanged.
+
+One caveat: `n` and `x` come from each process's environment. If two instances were deployed with different `REWARD_EVERY_N_ORDERS`, they would compute different milestones (for example, A rewards 5 while B rewards 3 and 6). Coupons would still never duplicate a milestone, but the reward rate would be wrong. Today this is a deployment rule (all instances share one config); the fix is to store the reward settings in the database (see §11).
 
 ---
 
@@ -406,7 +410,7 @@ The choices are explained in the error-model decision above; the full code table
 - **Coupons:** admin generation, earliest milestone first; admin coupon list with derived status.
 - **Reports:** the summary report.
 - **Database protections:** constraints and immutability triggers for every invariant the database can express.
-- **Test suite:** 27 integration tests against real PostgreSQL (8 of them concurrent), plus 4 money unit tests.
+- **Test suite:** 30 integration tests against real PostgreSQL (10 of them concurrent), plus 4 money unit tests.
 - **Operability:** Docker Compose for Postgres; migrations embedded and applied at startup; request tracing via `tower-http`.
 
 **Deferred, on purpose**
@@ -420,7 +424,8 @@ The choices are explained in the error-model decision above; the full code table
 - **Metrics and observability** beyond structured request logs: no metrics on lock waits, conflict rates or pool saturation.
 - **API documentation format.** There is no OpenAPI document. `README.md` documents every endpoint with `curl` examples, which was the better use of the timebox.
 - **Container image.** There is no app container; the app runs with `cargo run` against the Compose Postgres.
-- **Config-drift guard for `n`** (see §2).
+- **Config-drift guard for `n`** (see §2 and the multi-instance caveat in §4).
+- **Idempotent coupon generation.** If an administrator's generate request times out after commit and they retry, the retry rewards the *next* eligible milestone (or gets `NO_ELIGIBLE_MILESTONE`). No invariant breaks, because each coupon is for a distinct, reached milestone, but the administrator may get two coupons when they wanted one. `GET /admin/coupons` shows what exists. The fix is an `Idempotency-Key` on generation, or letting the caller name the milestone so a retry returns the existing coupon with `200`.
 
 ---
 
@@ -469,15 +474,15 @@ Admin routes would move behind role-based access control, with an audit log of p
 
 | File | Tests |
 |---|---|
-| `carts.rs` | `new_cart_is_open_and_empty`, `unknown_routes_and_methods_use_the_error_envelope`, `invalid_products_and_quantities_never_enter_the_cart`, `items_can_be_added_updated_and_removed_with_correct_totals`, `cart_shows_current_prices_and_flags_lines_that_cannot_be_bought` |
+| `carts.rs` | `new_cart_is_open_and_empty`, `unknown_routes_and_methods_use_the_error_envelope`, `invalid_products_and_quantities_never_enter_the_cart`, `items_can_be_added_updated_and_removed_with_correct_totals`, `cart_shows_current_prices_and_flags_lines_that_cannot_be_bought`, `admin_stock_adjustments_are_bounded_and_never_go_negative` |
 | `checkout.rs` | `checkout_creates_an_order_whose_snapshot_survives_product_changes`, `retrying_with_the_same_key_replays_the_order_without_side_effects`, `reusing_a_key_for_a_different_request_is_rejected`, `a_cart_is_checked_out_at_most_once_even_with_a_new_key`, `invalid_checkout_requests_fail_without_side_effects`, `failed_checkout_leaves_coupon_inventory_and_cart_untouched`, `checkout_charges_the_current_price_unless_the_price_guard_disagrees`, `discontinued_product_blocks_checkout` |
-| `concurrency.rs` | `concurrent_checkouts_never_oversell_limited_stock` (20 carts, 5 units), `overlapping_carts_do_not_deadlock_or_oversell` (opposite insertion orders), `concurrent_retries_of_one_checkout_create_exactly_one_order`, `concurrent_checkouts_of_one_cart_with_different_keys_create_one_order`, `a_coupon_is_redeemed_by_at_most_one_of_many_concurrent_checkouts`, `checkouts_that_fail_while_holding_the_coupon_do_not_consume_it`, `concurrent_coupon_generation_never_duplicates_a_milestone`, `items_added_during_checkout_are_either_ordered_or_rejected` |
+| `concurrency.rs` | `concurrent_checkouts_never_oversell_limited_stock` (20 carts, 5 units), `overlapping_carts_do_not_deadlock_or_oversell` (opposite insertion orders), `concurrent_retries_of_one_checkout_create_exactly_one_order`, `concurrent_checkouts_of_one_cart_with_different_keys_create_one_order`, `a_coupon_is_redeemed_by_at_most_one_of_many_concurrent_checkouts`, `checkouts_that_fail_while_holding_the_coupon_do_not_consume_it`, `concurrent_coupon_generation_never_duplicates_a_milestone`, `items_added_during_checkout_are_either_ordered_or_rejected`, `one_key_racing_on_two_carts_creates_exactly_one_order`, `reports_taken_during_concurrent_checkouts_are_internally_consistent` |
 | `coupons.rs` | `coupon_becomes_available_exactly_at_the_milestone`, `failed_checkouts_do_not_count_towards_milestones`, `delayed_generation_rewards_each_missed_milestone_once_in_order`, `discount_rounds_half_up_and_a_coupon_is_single_use`, `a_full_discount_yields_a_zero_total_never_a_negative_one` |
 | `reporting.rs` | `report_reconciles_with_orders_and_coupons_and_never_mutates_state`: recomputes every figure from `GET /admin/orders` and `GET /admin/coupons`, includes a failed checkout that must not appear, and repeats the report 5× while checking that state is unchanged. |
 
 ### Verifying the tests can fail
 
-The whole suite passed on its first run. A suite that has never failed proves little, so I mutated the implementation one safeguard at a time, in a scratch copy, and reran `tests/it/concurrency.rs` against each mutant:
+The whole suite passed on its first run. A suite that has never failed proves little, so I mutated the implementation one safeguard at a time, in a scratch copy, and reran the integration tests against each mutant (M7–M9 were added after an independent review; see §10):
 
 | Mutation | Result | What failed |
 |---|---|---|
@@ -488,6 +493,9 @@ The whole suite passed on its first run. A suite that has never failed proves li
 | M4: lock products in cart order (`ORDER BY ci.created_at`) instead of by id | **Caught** | The opposite-order carts deadlocked (`409 CONCURRENT_UPDATE`); the test took 7.9 s because of Postgres deadlock detection. |
 | M5: remove the cart `FOR UPDATE` | **Caught** | Round 0 of the add-item race: the order had 1 item while the checked-out cart held 2. Concurrent same-key retries got `409 CART_ALREADY_CHECKED_OUT` (from the `orders_cart_unique` backstop) instead of `200` replays. |
 | M6: remove the advisory lock from coupon generation | **Caught** | Still no duplicate coupon, because `coupons_milestone_unique` held, but colliding generators got `409 CONCURRENT_UPDATE`: only 3 of the 8 expected callers received a clean `NO_ELIGIBLE_MILESTONE`. |
+| M7: drop the three immutability triggers | **Caught** | Both tamper tests fail: without the triggers, `UPDATE orders SET created_at = now()` and `UPDATE coupons SET discount_percent = 50` simply succeed (`rows_affected: 1`), rewriting history. |
+| M8: run the report at READ COMMITTED instead of one REPEATABLE READ snapshot | **Caught** (3 of 3 runs) | A report read during 30 concurrent checkouts showed `gross_revenue_paise: 0` but 9,497 paise of per-product revenue in the same response, because orders committed between its queries. |
+| M9: stop mapping `orders_idempotency_key_unique` to `IDEMPOTENCY_KEY_REUSED` | **Caught** (3 of 3 runs) | One key racing on two carts returned `500` for the loser, which also proves the race really overlaps and reaches the unique-index wait. |
 
 The same experiment can be repeated by editing the lock clause named in each row and running `cargo test --test it concurrency::`.
 
@@ -501,7 +509,7 @@ These are corrections and redirections that actually happened during the build:
 
 1. **Milestones from a sequence: rejected.** The specification suggested "a stable order sequence" to determine milestones. Postgres sequences are non-transactional: a rolled-back checkout still consumes a number. Order numbers would then have gaps and stop meaning "k-th successful order". I replaced it with counting committed orders while holding an advisory lock (the milestone-counting decision).
 2. **A mutable coupon `status` column: replaced.** The suggested schema had `status: available | redeemed` on coupons, updated during checkout. I removed the column and derived the status from `orders.coupon_id UNIQUE`, which removes a whole class of "status disagrees with orders" bugs (the coupon-redemption decision).
-3. **SQL built with `format!`: rejected in review.** An early draft of `checkout.rs` had a generic `order_by(conn, predicate: &str, value)` helper that interpolated a WHERE clause with `format!`. The inputs were constants, so it wasn't exploitable, but it's exactly the pattern a reviewer should flag, and it saved nothing. I replaced it with two explicit queries, `order_for_key` and `order_for_cart`.
+3. **SQL built with `format!`: rejected in review.** An early draft of `checkout.rs` had a generic `order_by(conn, predicate: &str, value)` helper that interpolated a WHERE clause with `format!`. The inputs were constants, so it wasn't exploitable, but it's exactly the pattern a reviewer should flag, and it saved nothing. I replaced it with two explicit queries, `order_for_key` and `order_for_cart`. The remaining `format!` calls in `orders.rs` and `coupons.rs` only splice a `const &str` column list into a literal; no parameter or runtime value ever reaches them, which is the distinction that matters.
 4. **Price policy: extended.** The specification said checkout "may proceed at the new price". I kept that as the default and added the opt-in `expected_subtotal_paise` guard, so a client can refuse to pay an amount the customer never saw.
 5. **Environment: port changed.** The default compose port collided with existing local Postgres instances (5432 was in use, and 5433 failed to bind), so the project uses 54329.
 
@@ -509,6 +517,14 @@ What running the code taught me, as opposed to what I designed up front:
 
 - **The mutation runs showed which layer provides which guarantee.** Without the cart lock (M5), the database constraints still prevented a duplicate order, but the client got the wrong answer: a 409 instead of its own order. Without the product lock (M2), the guarded decrement still prevented overselling, but losers got a 500. Removing the generation advisory lock (M6) showed the same pattern for coupons. So the locks are what make the *error contract* correct; the constraints only keep the *data* correct. I kept both on purpose.
 - **One safeguard has no test of its own.** Removing only the coupon lock (M3b) is invisible to the suite, because the unique index catches the second redemption with the same error code. Correctness is unaffected; what the lock buys is that a losing redeemer fails before taking any product locks. I documented this instead of writing a timing-dependent test to force it.
+- **An independent review found gaps I had missed.** I ran a second AI pass with no context from the build session, given only the brief and the repository and asked to grade it like a hiring panel. It found no oversell, double-order or double-redemption bug, but it did find six real problems:
+  - The immutability "tamper" test would have passed even with the triggers dropped, because a CHECK constraint and a foreign key rejected those particular statements first. The test now asserts the trigger's own message, and adds tampers only a trigger can stop.
+  - A `statement_timeout` (`57014`) returned 500 although the docs promise a retryable 409.
+  - A huge `stock_delta` overflowed `INTEGER` and returned 500. It is now bounded (±1,000,000) and computed in `BIGINT`.
+  - There was no test for one key racing on two carts, and none for reports read during concurrent commits.
+  - "Every guarantee holds across instances" overclaimed, because `n` is per-process configuration.
+
+  I fixed or documented each one, and confirmed that every new test fails against the matching mutation (M7–M9). It also raised that coupon generation is not idempotent; see §7.
 - **The README walkthrough was executed verbatim** against a fresh database. Every annotated result (replay headers, 409/422 codes, coupon arithmetic, price guard, report totals) matched. While reviewing the docs I found that a wrong HTTP method returned Axum's empty-bodied 405, outside the error envelope. I fixed it with `method_not_allowed_fallback` and added `unknown_routes_and_methods_use_the_error_envelope`.
 
 ---
