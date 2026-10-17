@@ -540,4 +540,4 @@ What running the code taught me, as opposed to what I designed up front:
 
 ---
 
-Approximate time spent: **TODO (candidate): fill in your actual hours before submitting.**
+
