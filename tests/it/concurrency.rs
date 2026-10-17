@@ -304,3 +304,112 @@ async fn items_added_during_checkout_are_either_ordered_or_rejected() {
         assert_eq!(ordered, if add.status == 201 { 2 } else { 1 });
     }
 }
+
+/// The same Idempotency-Key sent for two *different* carts at the same
+/// instant: the cart locks don't serialize them, so the unique index on
+/// orders.idempotency_key decides. Exactly one order, the other gets 422.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn one_key_racing_on_two_carts_creates_exactly_one_order() {
+    let app = spawn_app().await;
+    let p = app.create_product("Pen", 1_000, 1_000).await;
+
+    for round in 0..10 {
+        let carts = vec![
+            app.cart_with(&[(p, 1)]).await,
+            app.cart_with(&[(p, 1)]).await,
+        ];
+        let results = race(carts.clone(), |cart| {
+            let app = app.clone();
+            async move {
+                app.checkout(cart, &format!("shared-{round}"), json!({}))
+                    .await
+            }
+        })
+        .await;
+
+        let mut outcome: Vec<(u16, String)> = results
+            .iter()
+            .map(|r| (r.status.as_u16(), r.code().to_string()))
+            .collect();
+        outcome.sort();
+        assert_eq!(
+            outcome,
+            [
+                (201, String::new()),
+                (422, "IDEMPOTENCY_KEY_REUSED".to_string())
+            ],
+            "round {round}"
+        );
+        let open = app
+            .scalar(&format!(
+                "SELECT count(*) FROM carts WHERE status = 'open' AND id IN ('{}', '{}')",
+                carts[0], carts[1]
+            ))
+            .await;
+        assert_eq!(open, 1, "round {round}: the losing cart must stay open");
+    }
+    assert_eq!(app.scalar("SELECT count(*) FROM orders").await, 10);
+    assert_eq!(app.stock(p).await, 1_000 - 10);
+}
+
+/// Reports read while checkouts are committing must still be internally
+/// consistent: every section comes from the same snapshot.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn reports_taken_during_concurrent_checkouts_are_internally_consistent() {
+    let app = spawn_app().await;
+    let a = app.create_product("A", 1_999, 1_000).await;
+    let b = app.create_product("B", 3_500, 1_000).await;
+    let mut carts = Vec::new();
+    for i in 0..30 {
+        carts.push(app.cart_with(&[(a, 1 + i % 3), (b, 1)]).await);
+    }
+
+    let jobs: Vec<Option<Uuid>> = carts
+        .into_iter()
+        .map(Some)
+        .chain((0..30).map(|_| None))
+        .collect();
+    let results = race(jobs, |job| {
+        let app = app.clone();
+        async move {
+            match job {
+                Some(cart) => app.checkout(cart, &format!("k-{cart}"), json!({})).await,
+                None => app.get("/admin/reports/summary").await,
+            }
+        }
+    })
+    .await;
+
+    for r in results.iter().filter(|r| r.body.get("products").is_some()) {
+        let gross = r.body["gross_revenue_paise"].as_i64().unwrap();
+        let by_product: i64 = r.body["products"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["gross_revenue_paise"].as_i64().unwrap())
+            .sum();
+        let units: i64 = r.body["products"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["quantity_sold"].as_i64().unwrap())
+            .sum();
+        let orders = r.body["successful_orders"].as_i64().unwrap();
+        assert_eq!(
+            by_product, gross,
+            "per-product revenue must match the order totals in the same report"
+        );
+        // Every order here buys exactly one B, so B's units equal the order count.
+        let b_units = r.body["products"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["product_id"] == b.to_string())
+            .unwrap()["quantity_sold"]
+            .as_i64()
+            .unwrap();
+        assert_eq!(b_units, orders);
+        assert!(units >= 2 * orders);
+    }
+    assert_eq!(results.iter().filter(|r| r.status == 201).count(), 30);
+}

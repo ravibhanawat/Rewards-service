@@ -1,7 +1,7 @@
 use checkout_service::RewardPolicy;
 use serde_json::json;
 
-use crate::common::spawn_app_with;
+use crate::common::{assert_immutable, spawn_app_with};
 
 #[tokio::test]
 async fn coupon_becomes_available_exactly_at_the_milestone() {
@@ -120,6 +120,10 @@ async fn discount_rounds_half_up_and_a_coupon_is_single_use() {
     let coupons = app.get("/admin/coupons").await.body;
     assert_eq!(coupons[0]["status"], "redeemed");
     assert_eq!(coupons[0]["redeemed_order_id"], order["id"]);
+
+    // Coupon terms cannot be rewritten after the fact.
+    assert_immutable(&app, "UPDATE coupons SET discount_percent = 50").await;
+    assert_immutable(&app, "DELETE FROM coupons").await;
 }
 
 #[tokio::test]

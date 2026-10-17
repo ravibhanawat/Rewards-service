@@ -3,7 +3,7 @@ use reqwest::Method;
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::common::{spawn_app, spawn_app_with};
+use crate::common::{assert_immutable, spawn_app, spawn_app_with};
 
 #[tokio::test]
 async fn checkout_creates_an_order_whose_snapshot_survives_product_changes() {
@@ -42,13 +42,16 @@ async fn checkout_creates_an_order_whose_snapshot_survives_product_changes() {
     assert_eq!(fetched.status, 200);
     assert_eq!(fetched.body, r.body);
 
-    // ...and the database refuses to, even if application code tried.
-    let tamper = sqlx::query("UPDATE order_items SET unit_price_paise = 1")
-        .execute(&app.pool)
-        .await;
-    assert!(tamper.is_err(), "order_items must be immutable");
-    let tamper = sqlx::query("DELETE FROM orders").execute(&app.pool).await;
-    assert!(tamper.is_err(), "orders must be immutable");
+    // ...and the database refuses to, even if application code tried. The
+    // message proves the immutability trigger fired, not some other CHECK/FK.
+    for tamper in [
+        "UPDATE orders SET created_at = now()",
+        "UPDATE order_items SET unit_price_paise = 1",
+        "DELETE FROM order_items",
+        "DELETE FROM orders",
+    ] {
+        assert_immutable(&app, tamper).await;
+    }
 
     let missing = app.get(&format!("/orders/{}", Uuid::new_v4())).await;
     assert_eq!(

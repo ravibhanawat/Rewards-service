@@ -142,6 +142,15 @@ where
     results
 }
 
+/// Asserts that `sql` is rejected by one of the immutability triggers.
+pub async fn assert_immutable(app: &TestApp, sql: &str) {
+    let err = sqlx::query(sql).execute(&app.pool).await.expect_err(sql);
+    assert!(
+        err.to_string().contains("rows are immutable"),
+        "{sql}: {err}"
+    );
+}
+
 impl TestApp {
     pub async fn request(
         &self,
