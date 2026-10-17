@@ -157,6 +157,7 @@ Every error has the same shape. Clients should branch on `error.code`; the HTTP 
 | `ORDER_NOT_FOUND` | 404 | Order id does not exist | `order_id` |
 | `ITEM_NOT_IN_CART` | 404 | PATCH/DELETE of a product that is not in the cart | `cart_id`, `product_id` |
 | `ROUTE_NOT_FOUND` | 404 | No such path | — |
+| `METHOD_NOT_ALLOWED` | 405 | Known path, wrong HTTP method | — |
 | `CART_ALREADY_CHECKED_OUT` | 409 | Mutating, or checking out with a new key, a cart that already has an order | `cart_id` |
 | `ITEM_ALREADY_IN_CART` | 409 | POST of a product already in the cart (use PATCH) | `product_id` |
 | `EMPTY_CART` | 409 | Checkout of a cart with no items | — |
@@ -169,7 +170,7 @@ Every error has the same shape. Clients should branch on `error.code`; the HTTP 
 | `SERVICE_UNAVAILABLE` | 503 | Connection pool exhausted; safe to retry | `retryable: true` |
 | `INTERNAL_ERROR` | 500 | Unexpected failure | — |
 
-A wrong HTTP method on a known path returns Axum's default `405` with an empty body.
+A wrong HTTP method on a known path returns `405` with code `METHOD_NOT_ALLOWED`, in the same envelope.
 
 ---
 
