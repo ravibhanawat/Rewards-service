@@ -60,6 +60,8 @@ pub enum AppError {
     OrderNotFound(Uuid),
     #[error("no such route")]
     RouteNotFound,
+    #[error("method not allowed for this route")]
+    MethodNotAllowed,
     #[error("product {product_id} is not in cart {cart_id}")]
     ItemNotInCart { cart_id: Uuid, product_id: Uuid },
 
@@ -110,6 +112,7 @@ impl AppError {
             ProductNotFound(_) => (StatusCode::NOT_FOUND, "PRODUCT_NOT_FOUND"),
             OrderNotFound(_) => (StatusCode::NOT_FOUND, "ORDER_NOT_FOUND"),
             RouteNotFound => (StatusCode::NOT_FOUND, "ROUTE_NOT_FOUND"),
+            MethodNotAllowed => (StatusCode::METHOD_NOT_ALLOWED, "METHOD_NOT_ALLOWED"),
             ItemNotInCart { .. } => (StatusCode::NOT_FOUND, "ITEM_NOT_IN_CART"),
             CartAlreadyCheckedOut(_) => (StatusCode::CONFLICT, "CART_ALREADY_CHECKED_OUT"),
             ItemAlreadyInCart { .. } => (StatusCode::CONFLICT, "ITEM_ALREADY_IN_CART"),

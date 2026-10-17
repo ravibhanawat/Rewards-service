@@ -50,6 +50,7 @@ pub fn router(state: AppState) -> Router {
         .route("/admin/coupons/generate", post(generate_coupon))
         .route("/admin/reports/summary", get(summary_report))
         .fallback(|| async { AppError::RouteNotFound })
+        .method_not_allowed_fallback(|| async { AppError::MethodNotAllowed })
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

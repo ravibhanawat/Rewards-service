@@ -1,3 +1,4 @@
+use reqwest::Method;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -34,6 +35,15 @@ async fn new_cart_is_open_and_empty() {
         (malformed.status.as_u16(), malformed.code()),
         (400, "INVALID_REQUEST")
     );
+}
+
+#[tokio::test]
+async fn unknown_routes_and_methods_use_the_error_envelope() {
+    let app = spawn_app().await;
+    let r = app.get("/no/such/route").await;
+    assert_eq!((r.status.as_u16(), r.code()), (404, "ROUTE_NOT_FOUND"));
+    let r = app.request(Method::PUT, "/carts", None, &[]).await;
+    assert_eq!((r.status.as_u16(), r.code()), (405, "METHOD_NOT_ALLOWED"));
 }
 
 #[tokio::test]
